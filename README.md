@@ -15,7 +15,7 @@ These MCP servers must be enabled in Cursor (global `mcp.json`):
 
 1. Open this workspace in Cursor.
 2. Run the **logiq-scan** command (`/logiq-scan`) or invoke the **logiq-monitor** agent (`@logiq-monitor`).
-3. Review the summary in chat and the daily log file under `logs/`.
+3. Review the summary in chat, the daily log file under `logs/`, and the observation JSON under `output/`.
 
 ## Invocation
 
@@ -48,13 +48,15 @@ flowchart LR
     Agent --> Glean[glean_default search/chat]
     Glean --> Helix[BMC Helix ITSM docs]
     Agent --> LogFile[logs/logiq-YYYY-MM-DD.log]
+    Agent --> OutputFile[output/logiq-observation-*.json]
 ```
 
 1. Load watermark from `state/last_watermark.json`.
 2. Poll `DM_JOB_LOG` for new rows with non-empty `error_message`.
 3. For each error: Glean search → read top documents → chat for resolution synthesis.
 4. Append structured entry to today's log file.
-5. Advance watermark to the highest processed row ID.
+5. Write structured observation JSON to `output/logiq-observation-{scanStarted}.json`.
+6. Advance watermark to the highest processed row ID.
 
 ## Project Layout
 
@@ -69,6 +71,7 @@ FAM_LogIQ/
 │   └── glean_prompts.md           # Glean prompt templates
 ├── state/                         # Watermark (gitignored)
 ├── logs/                          # Daily log output (gitignored)
+├── output/                        # Per-scan observation JSON (gitignored)
 └── README.md
 ```
 
@@ -89,6 +92,16 @@ SimilarIncidents: [title + URL list]
 SuggestedResolution: ...
 ===
 ```
+
+## Observation Output
+
+Each scan also writes a machine-readable JSON file:
+
+```
+output/logiq-observation-20260604T054800Z.json
+```
+
+The file contains scan metadata (`status`, watermarks, lookback, limit) and an `observations` array with one object per processed error (Glean query, similar incidents, suggested resolution). See `.cursor/rules/logiq-rules.md` for the full schema.
 
 ## Troubleshooting
 

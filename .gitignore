@@ -1,6 +1,7 @@
 # Runtime state and logs
 state/last_watermark.json
 logs/*.log
+output/*.json
 
 # Environment secrets
 .env

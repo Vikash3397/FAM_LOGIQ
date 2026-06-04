@@ -6,7 +6,7 @@ Single source of truth for the **logiq-monitor** agent. Read this file at the st
 
 ## Purpose
 
-Monitor distinct `DM_JOB_LOG` error records on FAM dev database (`INTDEVFAM@DWMSDEV`) where `error_message` is not null, `error_code < 0`, and `log_timestamp` is within a configurable lookback window (default **365 days** via `--days N`). Search Glean for similar BMC Helix ITSM incidents for the Financial Accounting Manager (FAM) application, and suggest resolutions. Write results to console (chat summary) and daily log files.
+Monitor distinct `DM_JOB_LOG` error records on FAM dev database (`INTDEVFAM@DWMSDEV`) where `error_message` is not null, `error_code < 0`, and `log_timestamp` is within a configurable lookback window (default **365 days** via `--days N`). Search Glean for similar BMC Helix ITSM incidents for the Financial Accounting Manager (FAM) application, and suggest resolutions. Write results to console (chat summary), daily log files, and a structured JSON observation output file per scan.
 
 ---
 
@@ -45,7 +45,9 @@ If no flags are provided, use default behavior (incremental poll from watermark,
    - If file missing, create it: `{"last_job_log_id": 0, "last_updated": "<ISO8601>"}`
    - If `--reset-watermark`, set `last_job_log_id` to `0` and save.
 4. Determine today's log path: `logs/logiq-YYYY-MM-DD.log` (UTC date).
-5. Parse `--days N` from the prompt; if omitted, use **365**. Validate N is a positive integer.
+5. Determine this run's observation output path: `output/logiq-observation-{scanStarted}.json` where `{scanStarted}` is the scan start timestamp in compact UTC form `YYYYMMDDTHHMMSSZ` (e.g. `20260604T054800Z`).
+6. Parse `--days N` from the prompt; if omitted, use **365**. Validate N is a positive integer.
+7. Initialize an in-memory observation payload (see **Observation Output Format** below) with scan metadata and an empty `observations` array.
 
 ### Phase 2 — Schema discovery (first run or on column errors)
 
@@ -69,6 +71,7 @@ Log the lookback window at scan start, e.g. `[timestamp] LogIQ scan started. Wat
 **If zero rows returned:**
 
 - Append a single line to today's log: `[timestamp] No new errors since watermark {id} (lookback: {days} days).`
+- Write the observation output file with `status: "no_errors"` and `observations: []`.
 - Return chat summary: "No new errors in DM_JOB_LOG since last scan."
 - Do not advance watermark.
 
@@ -123,6 +126,20 @@ SuggestedResolution:
 
 Use the Write tool to append (read existing file first, then write combined content) or Shell append on Windows: `Add-Content`.
 
+Also append one object to the in-memory `observations` array (see **Observation Output Format**).
+
+#### 4f. Write observation output file
+
+After processing all error rows (or on zero-error / aborted runs), write the observation payload to `output/logiq-observation-{scanStarted}.json` using the Write tool. Create the `output/` directory if missing.
+
+Set `scanCompleted` to the current ISO8601 UTC timestamp before writing. Set `status` to:
+
+| Situation | `status` |
+|-----------|----------|
+| One or more errors processed | `"completed"` |
+| Poll returned zero rows | `"no_errors"` |
+| DB or Glean auth failure before completion | `"aborted"` |
+
 ### Phase 5 — Advance watermark
 
 After all rows processed successfully:
@@ -142,7 +159,54 @@ Return a concise summary:
 - Highest watermark ID
 - Per-error: JobLogId, job name, error excerpt (first line), resolution headline
 - Log file path
+- Observation output file path
 - Cited URLs for top matches
+
+---
+
+## Observation Output Format
+
+Each scan writes one JSON file under `output/`. Example: `output/logiq-observation-20260604T054800Z.json`
+
+```json
+{
+  "scanStarted": "2026-06-04T05:48:00Z",
+  "scanCompleted": "2026-06-04T05:49:12Z",
+  "status": "completed",
+  "lookbackDays": 365,
+  "limit": 2,
+  "watermarkBefore": 0,
+  "watermarkAfter": 60806,
+  "errorsProcessed": 1,
+  "logFile": "logs/logiq-2026-06-04.log",
+  "observations": [
+    {
+      "jobLogId": 60806,
+      "jobId": 2981,
+      "jobName": "GENERATE REPORT",
+      "logTimestamp": "22-09-25 6:18:44.426364000 AM",
+      "errorCode": -936,
+      "errorMessage": "ORA-00936: missing expression",
+      "gleanSearchQuery": "ORA-00936 GENERATE REPORT FAM Financial Accounting Manager Helix",
+      "similarIncidents": [
+        {
+          "title": "FAM",
+          "url": "https://confluence.csgicorp.com/spaces/DWP/pages/1909083647/FAM"
+        }
+      ],
+      "suggestedResolution": "Full resolution text from Glean chat (truncate errorMessage to 2000 chars if needed).",
+      "resolutionHeadline": "One-line summary for chat display"
+    }
+  ]
+}
+```
+
+Rules:
+
+- Include all DB columns from the poll row (`jobLogId` maps to `id`).
+- `similarIncidents` must only contain titles and URLs returned by Glean tools.
+- `resolutionHeadline` is the first sentence or short summary of `suggestedResolution`.
+- On aborted runs, set `watermarkAfter` equal to `watermarkBefore` and include an `abortReason` string.
 
 ---
 
@@ -164,8 +228,8 @@ Return a concise summary:
 
 | Situation | Action |
 |-----------|--------|
-| DB connection / SQL error | Stop; report error; do not advance watermark |
-| Glean auth error | Stop; report auth issue; log partial results if any |
+| DB connection / SQL error | Stop; report error; do not advance watermark; write observation file with `status: "aborted"` and `abortReason` |
+| Glean auth error | Stop; report auth issue; log partial results if any; write observation file with processed observations and `status: "aborted"` |
 | Glean empty search | Log entry with "No similar incidents found"; suggest diagnostic steps only |
 | Long error_message | Full text in chat prompt; truncate to 2000 chars in log file |
 | Column name mismatch | Run schema discovery; remap columns; retry poll |
